@@ -1,0 +1,47 @@
+[package]
+name = "smt32_project"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "main"
+
+[dependencies]
+anyhow = { version = "1.0.71", default-features = false }
+
+defmt = "0.3.4"
+defmt-rtt = "0.4.0"
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.3"
+panic-probe = "0.3.1"
+
+[dependencies.embassy-embedded-hal]
+version = "0.1.0"
+git = "https://github.com/embassy-rs/embassy.git"
+
+#embedded-hal = "0.2.6"
+#embedded-hal-1 = { package = "embedded-hal", version = "=1.0.0-alpha.11" }
+#embedded-hal-async = { version = "=0.2.0-alpha.2" }
+
+
+[dependencies.embassy-sync]
+version = "0.2.0"
+git = "https://github.com/embassy-rs/embassy.git"
+features = ["nightly"]
+
+[dependencies.embassy-executor]
+version = "0.2.0"
+git = "https://github.com/embassy-rs/embassy.git"
+features = ["nightly", "defmt", "integrated-timers", "arch-cortex-m", "executor-thread"]
+
+[dependencies.embassy-stm32]
+version = "0.1.0"
+git = "https://github.com/embassy-rs/embassy.git"
+features = ["nightly", "stm32f411ce", "time-driver-any", "exti"]
+
+[dependencies.embassy-time]
+version = "0.1.0"
+git = "https://github.com/embassy-rs/embassy.git"
+features = ["defmt"]
+
+
