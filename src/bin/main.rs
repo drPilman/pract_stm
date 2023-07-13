@@ -60,6 +60,7 @@ impl Digit {
 }
 async fn multi<'d, STB: Pin, CLK: Pin, DIO: Pin>(display: &mut TMI1638<'d, STB, CLK, DIO, true>){
 
+    println!("multi");
     let mut digits = [Digit::new(); 8];
     let mut buttons = ButtonsBuffer::new();
     loop {
@@ -76,6 +77,7 @@ async fn multi<'d, STB: Pin, CLK: Pin, DIO: Pin>(display: &mut TMI1638<'d, STB, 
 }
 async fn one<'d, STB: Pin, CLK: Pin, DIO: Pin>(display: &mut TMI1638<'d, STB, CLK, DIO, false>){
     let mut number = 0u32;
+    println!("one");
     let mut t=0u32;
     let mut buttons = ButtonsBuffer::new();
     let mut buffer = DisplayBuffer::new();
@@ -116,7 +118,7 @@ async fn one<'d, STB: Pin, CLK: Pin, DIO: Pin>(display: &mut TMI1638<'d, STB, CL
 async fn main(_spawner: Spawner) {
 
     let p = embassy_stm32::init(Default::default());
-    let mut display_a = TMI1638::new(p.PB1, p.PB2, p.PB10).await;// auto
+    let mut display_a = TMI1638::new(p.PB10, p.PB2, p.PB1).await;// auto
     // let mut buffer = DisplayBuffer::new();
     // let zero = Char::D0;
     // for i in 0..8 {
@@ -124,7 +126,7 @@ async fn main(_spawner: Spawner) {
     // }
     // display.println(&mut buffer).await;
 
-    // display.exec(command::Control::TurnOn).await;
+    display_a.exec(command::Control::TurnOn).await;
 
 
     // let mut state = DemoMode::One;
