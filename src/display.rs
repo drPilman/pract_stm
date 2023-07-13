@@ -36,16 +36,16 @@ pub mod command {
 #[repr(u8)]
 #[derive(Copy, Clone)]
 pub enum Char {
-    D0 = 0b11_1111,
-    D1 = 0b110,
+    D0 = 0b011_1111,
+    D1 = 0b000_0110,
     D2 = 0b101_1011,
     D3 = 0b100_1111,
     D4 = 0b110_0110,
     D5 = 0b110_1101,
     D6 = 0b111_1101,
-    D7 = 0b111,
-    D8 = 0b111_1111u8,
-    D9 = 0b110_1111u8,
+    D7 = 0b000_0111,
+    D8 = 0b111_1111,
+    D9 = 0b110_1111,
     None = 0b0000_0000,
 }
 
@@ -72,11 +72,15 @@ impl From<u8> for Char {
         Char::from(((value % 10) + 48) as char) // 0=>'0'
     }
 }
+
+
+
 #[derive(Copy, Clone)]
 pub struct FullChar {
     pub _char: Char,
     pub dot: bool,
 }
+
 #[derive(Copy, Clone)]
 pub struct LED {
     pub is_on: bool,
@@ -288,14 +292,10 @@ impl<'d, STB: Pin, CLK: Pin, DIO: Pin, const IS_FIXED: bool> TMI1638<'d, STB, CL
         // Timer::after(Duration::from_micros(timings::PW_CLK)).await;
     }
     async fn send_byte(&mut self, mut byte: u8) {
-        for _ in 0..8 {
+        let byte_ = byte;
+        for i in 0..8u8 {
             self.clk.set_low();
-            if byte & 1 == 0 {
-                self.dio.set_low();
-            } else {
-                self.dio.set_high();
-            }
-            byte >>= 1;
+            self.dio.set_level(Level::from(byte & (1<<i) != 0));
             // Timer::after(Duration::from_micros(timings::PW_CLK)).await;
             self.clk.set_high();
             // Timer::after(Duration::from_micros(timings::PW_CLK)).await;

@@ -118,21 +118,24 @@ async fn one<'d, STB: Pin, CLK: Pin, DIO: Pin>(display: &mut TMI1638<'d, STB, CL
 async fn main(_spawner: Spawner) {
 
     let p = embassy_stm32::init(Default::default());
+
     let mut display_a = TMI1638::new(p.PB10, p.PB2, p.PB1).await;// auto
-    // let mut buffer = DisplayBuffer::new();
-    // let zero = Char::D0;
-    // for i in 0..8 {
-    //     zero.to(i, &mut buffer);
-    // }
-    // display.println(&mut buffer).await;
 
+
+    // // let mut buffer = DisplayBuffer::new();
+    // // let zero = Char::D0;
+    // // for i in 0..8 {
+    // //     zero.to(i, &mut buffer);
+    // // }
+    // // display.println(&mut buffer).await;
+    //
     display_a.exec(command::Control::TurnOn).await;
-
-
-    // let mut state = DemoMode::One;
-
-    // let mut buttons = ButtonsBuffer::new();
-
+    //
+    //
+    // // let mut state = DemoMode::One;
+    //
+    // // let mut buttons = ButtonsBuffer::new();
+    //
     loop {
         one(&mut display_a).await;
         let mut display = display_a.to_fixed().await;

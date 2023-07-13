@@ -8,3 +8,4 @@
 // #![feature(associated_const_equality)]
 
 pub mod display;
+pub mod keypad;
