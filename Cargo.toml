@@ -7,13 +7,15 @@ edition = "2021"
 name = "main"
 
 [dependencies]
-anyhow = { version = "1.0.71", default-features = false }
+#anyhow = { version = "1.0.71", default-features = false }
 
 defmt = "0.3.4"
 defmt-rtt = "0.4.0"
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7.3"
 panic-probe = "0.3.1"
+rand = { version = "0.8.3", features = ["small_rng"], default-features = false }
+#enum-primitive-derive = "0.2.2"
 
 [dependencies.embassy-embedded-hal]
 version = "0.1.0"
@@ -37,11 +39,19 @@ features = ["nightly", "defmt", "integrated-timers", "arch-cortex-m", "executor-
 [dependencies.embassy-stm32]
 version = "0.1.0"
 git = "https://github.com/embassy-rs/embassy.git"
-features = ["nightly", "stm32f411ce", "time-driver-any", "exti"]
+features = ["nightly", "stm32f411ce", "time-driver-any", "exti", "defmt", "rt"]
 
+#["unstable-traits", "defmt", "unstable-pac", "memory-x", "time-driver-any", "embedded-sdmmc", "chrono"]
 [dependencies.embassy-time]
 version = "0.1.0"
 git = "https://github.com/embassy-rs/embassy.git"
 features = ["defmt"]
+
+[dependencies.embassy-futures]
+version = "0.1.0"
+git = "https://github.com/embassy-rs/embassy.git"
+
+
+
 
 

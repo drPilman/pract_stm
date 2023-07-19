@@ -1,311 +1,164 @@
-use defmt::{panic, unreachable, println};
-use embassy_stm32::{Peripheral, into_ref};
-use embassy_stm32::gpio::{Level, Output, Pull, Speed, Pin, Flex};
-use embassy_time::{Duration, Timer};
-use {defmt_rtt as _, panic_probe as _};
+mod reg;
 
-mod timings {
-    pub const PW_CLK:u64=1;
-}
+use core::cmp::min;
+use cortex_m::asm::delay;
+use embassy_stm32::{Peripheral, into_ref};
+use embassy_stm32::gpio::{Level, Output, Pull, Speed, Pin, Flex, AnyPin};
+pub use reg::{Char, FullChar};
+use reg::Control;
 
 #[non_exhaustive]
-pub struct TMI1638<'d, STB: Pin, CLK: Pin, DIO: Pin, const IS_FIXED: bool> {
-    stb: Output<'d, STB>,
-    clk: Output<'d, CLK>,
-    dio: Flex<'d, DIO>,
+pub struct TMI1638<'d> {
+    stb: Output<'d, AnyPin>,
+    clk: Output<'d, AnyPin>,
+    dio: Flex<'d, AnyPin>,
+    leds: u8,
+    buttons: u8,
+    digits: [u8; 8],
+    mode: reg::Mode,
 }
 
-pub mod command {
-    #[repr(u8)]
-    #[derive(Copy, Clone)]
-    pub enum Control {
-        TurnOn = 0b10_00_1_111u8,
-        TurnOff = 0b10_00_0_000u8,
-    }
-
-    #[repr(u8)]
-    #[derive(Copy, Clone)]
-    pub enum Mode {
-        Fixed = 0b01_00_01_00u8,
-        Auto = 0b01_00_00_00u8,
-        ReadFixed = 0b01_00_01_10,
-        ReadAuto = 0b01_00_00_10,
-    }
-}
-
-#[repr(u8)]
-#[derive(Copy, Clone)]
-pub enum Char {
-    D0 = 0b011_1111,
-    D1 = 0b000_0110,
-    D2 = 0b101_1011,
-    D3 = 0b100_1111,
-    D4 = 0b110_0110,
-    D5 = 0b110_1101,
-    D6 = 0b111_1101,
-    D7 = 0b000_0111,
-    D8 = 0b111_1111,
-    D9 = 0b110_1111,
-    None = 0b0000_0000,
-}
-
-impl From<char> for Char {
-    fn from(value: char) -> Self {
-        match value {
-            '0' => Char::D0,
-            '1' => Char::D1,
-            '2' => Char::D2,
-            '3' => Char::D3,
-            '4' => Char::D4,
-            '5' => Char::D5,
-            '6' => Char::D6,
-            '7' => Char::D7,
-            '8' => Char::D8,
-            '9' => Char::D9,
-            _ => Char::None,
-        }
-    }
-}
-
-impl From<u8> for Char {
-    fn from(value: u8) -> Self {
-        Char::from(((value % 10) + 48) as char) // 0=>'0'
-    }
-}
-
-
-
-#[derive(Copy, Clone)]
-pub struct FullChar {
-    pub _char: Char,
-    pub dot: bool,
-}
-
-#[derive(Copy, Clone)]
-pub struct LED {
-    pub is_on: bool,
-}
-#[derive(Copy, Clone)]
-pub struct FullCharLED {
-    pub full_char: FullChar,
-    pub led: LED,
-}
-
-pub trait Byte {
-    const OFFSET: u8 = 0;
-    fn as_byte(&self) -> u8;
-    fn to(&self, pos: u8, buffer: &mut DisplayBuffer) {
-        // println!("pos:{:?} data:{:?}", (pos << 1 + Self::OFFSET) as usize, self.as_byte());
-        buffer.data[((pos << 1) + Self::OFFSET) as usize] = self.as_byte();
-    }
-}
-
-impl Byte for Char {
-    fn as_byte(&self) -> u8 { *self as u8 }
-}
-
-impl Byte for FullChar {
-    fn as_byte(&self) -> u8 {
-        let byte = self._char as u8;
-        if self.dot { byte | 0b1000_0000u8 } else { byte }
-    }
-}
-
-impl Byte for LED {
-    const OFFSET: u8 = 1;
-    fn as_byte(&self) -> u8 {
-        if self.is_on { 0xff } else { 0 }
-    }
-}
-
-impl Byte for FullCharLED {
-    fn as_byte(&self) -> u8 {
-        unreachable!()
-    }
-    fn to(&self, pos: u8, buffer: &mut DisplayBuffer) {
-        buffer.data[(pos << 1) as usize] = self.full_char.as_byte();
-        buffer.data[((pos << 1) + 1) as usize] = self.led.as_byte();
-    }
-}
-
-
-const NULL_ADDRESS: u8 = 0b1100_0000;
-
-pub trait PrintAt<'d, STB: Pin, CLK: Pin, DIO: Pin, const IS_FIXED: bool, T: Byte>: Send {
-    async fn print_at(&mut self, pos: u8, symbol: &T) {
-        if pos > 7 { panic!("Can't write at pos {}. Position must be in 0..8", pos) }
-        self.send(NULL_ADDRESS + (pos << 1) + T::OFFSET, &[symbol.as_byte()]).await;
-    }
-}
-
-/// impl PrintAt for TMI1638 in Fixed Mode
-impl<'d, STB: Pin, CLK: Pin, DIO: Pin> PrintAt<'d, STB, CLK, DIO, true, Char> for TMI1638<'d, STB, CLK, DIO, true> {}
-
-impl<'d, STB: Pin, CLK: Pin, DIO: Pin> PrintAt<'d, STB, CLK, DIO, true, FullChar> for TMI1638<'d, STB, CLK, DIO, true> {}
-
-impl<'d, STB: Pin, CLK: Pin, DIO: Pin> PrintAt<'d, STB, CLK, DIO, true, LED> for TMI1638<'d, STB, CLK, DIO, true> {}
-
-impl<'d, STB: Pin, CLK: Pin, DIO: Pin> PrintAt<'d, STB, CLK, DIO, true, FullCharLED> for TMI1638<'d, STB, CLK, DIO, true> {
-    async fn print_at(&mut self, pos: u8, symbol: &FullCharLED) {
-        if pos > 7 { panic!("Can't write at pos {}. Position must be in 0..8", pos) }
-        self.send(NULL_ADDRESS + (pos << 1),
-                  &[symbol.full_char.as_byte()]).await;
-        self.send(NULL_ADDRESS + (pos << 1) + 1,
-                  &[symbol.led.as_byte()]).await;
-    }
-}
-
-pub struct DisplayBuffer {
-    pub data: [u8; 16],
-}
-
-impl DisplayBuffer {
-    pub fn new() -> Self {
-        Self { data: [0u8; 16] }
-    }
-}
-
-pub struct ButtonsBuffer {
-    pub data: [u8; 4],
-}
-
-impl ButtonsBuffer {
-    pub fn new() -> Self {
-        Self { data: [0u8; 4] }
-    }
-    pub fn is_pressed(&self, pos: usize) -> bool {
-        if pos < 4 {
-            self.data[pos] & 1 != 0
-        } else if pos < 8 {
-            self.data[pos - 4] & 16u8 != 0
-        } else {
-            panic!("pos for button read must be in 0..8")
-        }
-    }
-    pub fn is_any_pressed(&self) -> bool {
-        let mut sum = 0u8;
-        for byte in &self.data {
-            sum |= byte;
-        }
-        sum != 0
-    }
-}
-
-impl<'d, STB: Pin, CLK: Pin, DIO: Pin> TMI1638<'d, STB, CLK, DIO, false> {
-    pub async fn new(stb: impl Peripheral<P=STB> + 'd, clk: impl Peripheral<P=CLK> + 'd, dio: impl Peripheral<P=DIO> + 'd) -> Self {
+impl<'d> TMI1638<'d> {
+    pub fn new<STB: Pin, CLK: Pin, DIO: Pin>(stb: impl Peripheral<P=STB> + 'd, clk: impl Peripheral<P=CLK> + 'd, dio: impl Peripheral<P=DIO> + 'd) -> Self {
         into_ref!(stb, clk, dio);
-        let stb = Output::new(stb, Level::High, Speed::Low);
-        let clk = Output::new(clk, Level::High, Speed::Low);
-        let mut dio = Flex::new(dio);
+        let stb = Output::new(stb, Level::High, Speed::Low).degrade();
+        let clk = Output::new(clk, Level::High, Speed::Low).degrade();
+        let mut dio = Flex::new(dio).degrade();
         dio.set_as_input_output(Speed::Low, Pull::Up);
         dio.set_high();
-
         let mut display = Self {
             stb,
             clk,
             dio,
-        }.init().await;
-        display.send(NULL_ADDRESS, &[0u8; 16]).await;
+            leds: 0x00,
+            buttons: 0,
+            digits: [0u8; 8],
+            mode: reg::Mode::Auto,
+        };
+        display.send(display.mode as u8, &[]);
+        display.update();
+        display.turn_on(7);
         display
     }
-    async fn init(mut self) -> TMI1638<'d, STB, CLK, DIO, false> {
-        self.send(command::Mode::Auto as u8, &[]).await;
-        self
-    }
-
-    pub async fn to_fixed(self) -> TMI1638<'d, STB, CLK, DIO, true> {
-        TMI1638::<STB, CLK, DIO, true> {
-            stb: self.stb,
-            clk: self.clk,
-            dio: self.dio,
-        }.init().await
-    }
-    pub async fn println(&mut self, buffer: &DisplayBuffer) {
-        self.send(NULL_ADDRESS, &buffer.data).await
-    }
-}
-
-
-impl<'d, STB: Pin, CLK: Pin, DIO: Pin> TMI1638<'d, STB, CLK, DIO, true> {
-    async fn init(mut self) -> TMI1638<'d, STB, CLK, DIO, true> {
-        self.send(command::Mode::Fixed as u8, &[]).await;
-        self
-    }
-    pub async fn to_auto(self) -> TMI1638<'d, STB, CLK, DIO, false> {
-        TMI1638::<STB, CLK, DIO, false> {
-            stb: self.stb,
-            clk: self.clk,
-            dio: self.dio,
-        }.init().await
-    }
-}
-
-pub trait Send {
-    async fn send(&mut self, _command: u8, _data: &[u8]) {}
-}
-
-impl<'d, STB: Pin, CLK: Pin, DIO: Pin, const IS_FIXED: bool> Send for TMI1638<'d, STB, CLK, DIO, IS_FIXED> {
-    async fn send(&mut self, command: u8, data: &[u8]) {
-        // println!("send");
-        self.stb.set_low();
-        // Timer::after(Duration::from_micros(timings::PW_CLK)).await;
-        self.send_byte(command).await;
-        for byte in data {
-            // Timer::after(Duration::from_micros(timings::PW_CLK)).await;
-            self.send_byte(*byte).await;
-            // Timer::after(Duration::from_micros(timings::PW_CLK)).await;
+    fn update(&mut self) {
+        self.set_mode(reg::Mode::Auto);
+        let mut buffer = [0u8; 16];
+        for i in 0..8 {
+            buffer[i << 1] = self.digits[i];
+            buffer[(i << 1) + 1] = (self.leds >> i) & 1;
         }
-        // Timer::after(Duration::from_micros(timings::PW_CLK)).await;
-        self.stb.set_high();
-        // Timer::after(Duration::from_micros(timings::PW_CLK)).await;
+        self.send(reg::NULL_ADDRESS as u8, &buffer)
     }
-}
-
-impl<'d, STB: Pin, CLK: Pin, DIO: Pin, const IS_FIXED: bool> TMI1638<'d, STB, CLK, DIO, IS_FIXED> {
-    pub async fn read(&mut self, buffer: &mut ButtonsBuffer) {
-        // println!("read");
+    fn set_mode(&mut self, mode: reg::Mode) {
+        if self.mode as u8 != mode as u8 {
+            self.send(mode as u8, &[]);
+            self.mode = mode;
+        }
+    }
+    fn send(&mut self, command: u8, data: &[u8]) {
         self.stb.set_low();
-        // Timer::after(Duration::from_micros(timings::PW_CLK)).await;
-        self.send_byte(if IS_FIXED { command::Mode::ReadFixed } else { command::Mode::ReadAuto } as u8).await;
+        self.send_byte(command);
+        for byte in data {
+            self.send_byte(*byte);
+        }
+        self.stb.set_high();
+    }
+    pub fn update_buttons(&mut self) {
+        let mut buffer = [0u8; 4];
+        self.stb.set_low();
+        self.send_byte((self.mode as u8) | 0b10);
         self.dio.set_high();
-
-        Timer::after(Duration::from_micros(timings::PW_CLK )).await; // T_wait
-
+        delay(10); // ???
         for i in 0..4 {
             for j in 0..8u8 {
                 self.clk.set_low();
-
-                // Timer::after(Duration::from_micros(timings::PW_CLK)).await;
                 if self.dio.is_high() {
-                    buffer.data[i] |= 1 << j
+                    buffer[i] |= 1 << j
                 } else {
-                    buffer.data[i] &= !(1 << j);
+                    buffer[i] &= !(1 << j);
                 }
                 self.clk.set_high();
-
-                // Timer::after(Duration::from_micros(timings::PW_CLK)).await;
             }
         }
-
-        // Timer::after(Duration::from_micros(timings::PW_CLK)).await;
         self.stb.set_high();
-        // Timer::after(Duration::from_micros(timings::PW_CLK)).await;
-    }
-    async fn send_byte(&mut self, mut byte: u8) {
-        let byte_ = byte;
-        for i in 0..8u8 {
-            self.clk.set_low();
-            self.dio.set_level(Level::from(byte & (1<<i) != 0));
-            // Timer::after(Duration::from_micros(timings::PW_CLK)).await;
-            self.clk.set_high();
-            // Timer::after(Duration::from_micros(timings::PW_CLK)).await;
+        self.buttons = 0;
+        for i in 0..4 {
+            self.buttons |= (buffer[i] & 1) << i;
+            self.buttons |= ((buffer[i] >> 4) & 1) << (i + 4);
         }
     }
-    pub async fn exec(&mut self, cmd: command::Control) {
-        self.send(cmd as u8, &[]).await;
+    pub fn is_button_pressed(&self, pos: u8) -> bool {
+        (self.buttons >> (pos & 0b111)) & 1 == 1
     }
+    pub fn is_any_button_pressed(&self) -> bool {
+        self.buttons != 0
+    }
+    fn send_byte(&mut self, byte: u8) {
+        for i in 0..8u8 {
+            self.clk.set_low();
+            self.dio.set_level(Level::from(byte & (1 << i) != 0));
+            self.clk.set_high();
+        }
+    }
+    pub fn print_at(&mut self, symbol: impl Into<FullChar>, pos: usize) {
+        let pos = pos & 0b111;
+        self.set_mode(reg::Mode::Fixed);
+        let char = symbol.into().as_byte();
+        self.digits[pos] = char;
+        self.send(reg::NULL_ADDRESS + (pos << 1) as u8, &[char]);
+    }
+    pub fn set_led(&mut self, is_on: bool, pos: usize) {
+        let mask = 1u8 << (pos as u8);
+        self.set_mode(reg::Mode::Fixed);
+        if is_on {
+            self.leds |= mask;
+        } else {
+            self.leds &= !mask;
+        }
+        self.send(reg::NULL_ADDRESS + ((pos as u8) << 1u8) + 1, &[is_on as u8]);
+    }
+    pub fn print_number(&mut self, mut number: u8) {
+        self.digits = [0u8; 8];
+        for i in 0..8 {
+            self.digits[7 - i] = FullChar::from(number % 10).as_byte();
+            number /= 10;
+            if number == 0 { break; }
+        }
+        self.update();
+    }
+    pub fn turn_on(&mut self, brightness: u8) {
+        self.send(Control::TurnOn as u8 | (brightness & 0b111), &[]);
+    }
+    pub fn turn_off(&mut self) {
+        self.send(Control::TurnOff as u8, &[]);
+    }
+}
 
-    pub async fn turn_on_with_brightness(&mut self, brightness: u8) {
-        self.send(command::Control::TurnOn as u8 | (brightness % 0b111), &[]).await;
+pub trait Println<T> {
+    fn println(&mut self, _symbols: T, pos: usize) {
+        if pos > 7 { panic!("Wrong pos to write {}", pos) }
+        self._println(_symbols, pos)
+    }
+    fn _println(&mut self, _symbols: T, pos: usize) {}
+}
+
+impl<'d> Println<&'static str> for TMI1638<'d> {
+    fn _println(&mut self, symbols: &'static str, pos: usize) {
+        // self.digits = [0u8; 8];
+        let t = symbols.as_bytes();
+        for i in pos..min( t.len(), 8 - pos) {
+            self.digits[pos + i] = <char as Into<FullChar>>::into(t[i] as char).as_byte();
+        }
+        self.update();
+    }
+}
+
+impl<'d, T: Into<FullChar> + Copy> Println<&[T]> for TMI1638<'d> {
+    fn _println(&mut self, symbols: &[T], pos: usize) {
+        // self.digits = [0u8; 8];
+        for i in 0..min(symbols.len(), 8 - pos) {
+            self.digits[pos + i] = symbols[i].into().as_byte();
+        }
+        self.update();
     }
 }

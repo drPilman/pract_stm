@@ -1,12 +1,20 @@
-use cortex_m::asm::delay;
-use defmt::{panic, unreachable, println};
+#![feature(get_many_mut)]
+
+use core::future::Future;
+use embassy_executor::Spawner;
 use embassy_stm32::{Peripheral, into_ref};
-use embassy_stm32::gpio::{Level, Input, Pull, Speed, Pin, OutputOpenDrain, AnyPin};
-use embassy_stm32::peripherals::TIM4;
-use embassy_time::{Duration, Timer};
-use {defmt_rtt as _, panic_probe as _};
+use embassy_stm32::exti::{AnyChannel, ExtiInput};
+use embassy_stm32::gpio::{Level, Input, Pull, Speed, OutputOpenDrain, AnyPin};
+// use embassy_futures::select;
+use embassy_time::{Timer, Duration};
 
-
+#[derive(Copy, Clone)]
+pub struct Button<'a>{
+    pub row: u8,
+    pub col: u8,
+    pub digit: Option<u8>,
+    pub string: &'a str,
+}
 /// 5 rows in OutputOpenDrain without pull.
 /// - high=> hi-z
 /// - low=> to vss
@@ -15,91 +23,119 @@ use {defmt_rtt as _, panic_probe as _};
 /// 4 cols in input with pull up
 ///
 #[non_exhaustive]
-pub struct KeyPad<'d, R0: Pin, R1: Pin, R2: Pin, R3: Pin, R4: Pin, C0: Pin, C1: Pin, C2: Pin, C3: Pin> {
-    rows: Rows<'d, R0, R1, R2, R3, R4>,
-    cols: Cols<'d, C0, C1, C2, C3>,
-    buffer: u32,
+pub struct KeyPad<'d, const ROW_N:usize, const COL_N:usize> {
+    rows: [OutputOpenDrain<'d, AnyPin>; ROW_N],
+    cols: [ExtiInput<'d, AnyPin>; COL_N],
+    pub buffer: u32,
+    mapping: [[&'d str; COL_N]; ROW_N],
 }
-
-struct Rows<'d, R0: Pin, R1: Pin, R2: Pin, R3: Pin, R4: Pin> {
-    r0: OutputOpenDrain<'d, R0>,
-    r1: OutputOpenDrain<'d, R1>,
-    r2: OutputOpenDrain<'d, R2>,
-    r3: OutputOpenDrain<'d, R3>,
-    r4: OutputOpenDrain<'d, R4>,
-}
-
-struct Cols<'d, T0: Pin, T1: Pin, T2: Pin, T3: Pin> {
-    c0: Input<'d, T0>,
-    c1: Input<'d, T1>,
-    c2: Input<'d, T2>,
-    c3: Input<'d, T3>,
-}
-
-fn init_row<'d, T: Pin>(pin: impl Peripheral<P=T> + 'd) -> OutputOpenDrain<'d, T> {
+fn init_row<'d>(pin: AnyPin) -> OutputOpenDrain<'d, AnyPin> {
     into_ref!(pin);
     OutputOpenDrain::new(pin,
                          Level::High,
                          Speed::Low,
                          Pull::None)
 }
-
-fn init_col<'d, T: Pin>(pin: impl Peripheral<P=T> + 'd) -> Input<'d, T> {
+fn init_col<'d>(pin_and_channel: (AnyPin, AnyChannel)) -> ExtiInput<'d, AnyPin> {
+    let pin = pin_and_channel.0;
     into_ref!(pin);
-    Input::new(pin, Pull::Up)
+    ExtiInput::new(Input::new(pin, Pull::Up).degrade(), pin_and_channel.1)
 }
+// async fn waiting<'d>(pin: &mut ExtiInput<'d, AnyPin>) -> Future<Output=()> {
+//     pin.wait_for_falling_edge()
+// }
 
-impl<'d, R0: Pin, R1: Pin, R2: Pin, R3: Pin, R4: Pin, C0: Pin, C1: Pin, C2: Pin, C3: Pin> KeyPad<'d, R0, R1, R2, R3, R4, C0, C1, C2, C3> {
-    pub fn new(r0: impl Peripheral<P=R0> + 'd,
-               r1: impl Peripheral<P=R1> + 'd,
-               r2: impl Peripheral<P=R2> + 'd,
-               r3: impl Peripheral<P=R3> + 'd,
-               r4: impl Peripheral<P=R4> + 'd,
-               c0: impl Peripheral<P=C0> + 'd,
-               c1: impl Peripheral<P=C1> + 'd,
-               c2: impl Peripheral<P=C2> + 'd,
-               c3: impl Peripheral<P=C3> + 'd) -> Self {
+impl<'d, const ROW_N:usize, const COL_N:usize> KeyPad<'d, ROW_N, COL_N> {
+    pub fn new(rows: [AnyPin; ROW_N],
+               cols: [(AnyPin, AnyChannel); COL_N],
+               mapping: [[&'d str; COL_N];ROW_N]) -> Self {
         Self {
-            rows: Rows {
-                r0: init_row(r0),
-                r1: init_row(r1),
-                r2: init_row(r2),
-                r3: init_row(r3),
-                r4: init_row(r4),
-            },
-            cols: Cols {
-                c0: init_col(c0),
-                c1: init_col(c1),
-                c2: init_col(c2),
-                c3: init_col(c3),
-            },
+            rows: rows.map(init_row),
+            cols: cols.map(init_col),
             buffer: 0,
+            mapping,
         }
     }
 
-    fn read(&mut self){
-        self.rows.r0.set_low();
-        self.read_row( 0 );
-        self.rows.r0.set_high();
-        delay(1);
-        // self.read_row( 1 );
-        // self.read_row( 2 );
-        // self.read_row( 3 );
-        // self.read_row( 4 );
+    pub fn is_pressed(&self, row: usize, col: usize) -> bool {
+        ((self.buffer >> (COL_N*row + col)) & 1) == 1
     }
-    fn read_col(&mut self, is_low: bool, n_row:u32, n_col:u32) {
-        let b = 1u32<<((n_row<<2) + n_col);
-        if is_low{
-            self.buffer|=b;
-        }else{
-            self.buffer&=!b;
+
+    pub fn get_one_key(&self)->Option<Button>{
+        for row in 0..ROW_N{
+            for col in 0..COL_N{
+                if self.is_pressed(row,col){
+                    let t = self.mapping[row][col];
+                    return Some(Button{
+                        row: row as u8,
+                        col: col as u8,
+                        digit: t.parse().ok(),
+                        string: t,
+                    })
+                }
+            }
+        }
+        return None
+    }
+    pub async fn update(&mut self) {
+        let mut mask = 1u32;
+        for row in 0..ROW_N {
+            self.rows[row].set_low();
+            for col in 0..COL_N {
+                // let b = 1u32 << ((row << 2) + col);
+                if self.cols[col].is_low() {
+                    self.buffer |= mask;
+                } else {
+                    self.buffer &= !mask;
+                }
+                mask <<= 1;
+            }
+            self.rows[row].set_high();
+            Timer::after(Duration::from_micros(1)).await;
         }
     }
-    fn read_row(&mut self, n_row:u32) {
-        self.read_col(self.cols.c0.is_low(), n_row, 0 );
-        self.read_col(self.cols.c1.is_low(), n_row, 1 );
-        self.read_col(self.cols.c2.is_low(), n_row, 2 );
-        self.read_col(self.cols.c3.is_low(), n_row, 3 );
+    pub async fn wait_none(&mut self){
+        loop {
+            self.update().await;
+            if self.buffer.count_ones() == 0 {
+                return
+            }
+            Timer::after(Duration::from_micros(10)).await;
+        }
     }
+
+    pub async fn wait_one(&mut self) -> Option<Button> {
+        loop {
+            self.update().await;
+            if self.buffer.count_ones() == 1 {
+                return self.get_one_key();
+            }
+            Timer::after(Duration::from_micros(10)).await;
+        }
+    }
+    //
+    // pub async fn wait_any(&mut self, spawner: Spawner) {
+    //     for row in 0..ROW_N {
+    //         self.rows[row].set_low();
+    //     }
+    //     for col in &mut self.cols{
+    //         spawner.spawn(waiting_for_col(col)).unwrap();
+    //     }
+    //     // let t = self.cols.map();
+    //     let t:[Future<Output=()>;COL_N];
+    //     select::select_array(self.cols.iter_mut().map(|x:&mut ExtiInput<'_, AnyPin>| async{x.wait_for_falling_edge()})).await;
+    //     // maybe  split_first_mut or unsafe
+    //     if let Ok([col0, col1, col2, col3]) = self.cols.get_many_mut([0, 1, 2, 3]) {
+    //         select::select4(
+    //             col0.wait_for_falling_edge(),
+    //             col1.wait_for_falling_edge(),
+    //             col2.wait_for_falling_edge(),
+    //             col3.wait_for_falling_edge(),
+    //         ).await;
+    //     }
+    //     for row in 0..ROW_N {
+    //         self.rows[row].set_high();
+    //     }
+    // }
 }
 
